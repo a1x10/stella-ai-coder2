@@ -209,8 +209,11 @@ class StellaAgent:
         self.session_file = self._new_session_file()
         self.pixel_session_file = self._new_pixel_session_file()
         self._pending_pixel_tool_id: str | None = None
+        self._pixel_hook_cfg: dict[str, Any] | None = None
+        self._pixel_hook_disabled = False
         self.status_window = StellaStatusWindow()
         self._log("session_start", {"model": self.model, "provider": self.provider, "root": str(self.root), "version": APP_VERSION, "pixel_jsonl": str(self.pixel_session_file)})
+        self._pixel_hook_emit("SessionStart", source="startup", transcript_path=str(self.pixel_session_file), cwd=str(self.root))
 
     def _new_session_file(self) -> Path:
         session_dir = self.root / ".stella" / "sessions"
@@ -221,12 +224,12 @@ class StellaAgent:
     def _new_pixel_session_file(self) -> Path:
         """Create a Claude-compatible JSONL location so Pixel Agents can visualize Stella sessions.
 
-        Pixel Agents currently watches ~/.claude/projects/*/*.jsonl. Stella writes a compatible,
-        observational transcript there while keeping its own native transcript in .stella/sessions.
+        Pixel Agents/Claude Code derives the project directory name from cwd by replacing every
+        non-alphanumeric character (except '-') with '-'. Using the same algorithm here lets the
+        external session scanner adopt Stella's transcript without any extra metadata.
         """
-        digest = hashlib.sha1(str(self.root).encode("utf-8", errors="ignore")).hexdigest()[:16]
-        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", self.root.name or "project")[:40]
-        session_dir = Path.home() / ".claude" / "projects" / f"stella-{safe_name}-{digest}"
+        normalized = re.sub(r"[^A-Za-z0-9-]", "-", str(self.root))
+        session_dir = Path.home() / ".claude" / "projects" / normalized
         session_dir.mkdir(parents=True, exist_ok=True)
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         return session_dir / f"stella-{stamp}-{self.pixel_session_id[:8]}.jsonl"
@@ -259,8 +262,10 @@ class StellaAgent:
         self.root = root.expanduser().resolve()
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.session_file = self._new_session_file()
+        self.pixel_session_id = uuid.uuid4().hex
         self.pixel_session_file = self._new_pixel_session_file()
         self._log("root_change", {"root": str(self.root), "model": self.model, "provider": self.provider, "pixel_jsonl": str(self.pixel_session_file)})
+        self._pixel_hook_emit("SessionStart", source="root_change", transcript_path=str(self.pixel_session_file), cwd=str(self.root))
 
     def chat(self, user_text: str) -> str:
         if looks_like_project_question(user_text):
@@ -328,10 +333,13 @@ class StellaAgent:
         if payload and "tool" in payload:
             tool_id = "toolu_stella_" + uuid.uuid4().hex[:18]
             self._pending_pixel_tool_id = tool_id
+            tool_name = str(payload.get("tool"))
+            tool_input = payload.get("args", {}) if isinstance(payload.get("args", {}), dict) else {}
             self._write_pixel_record({
                 "type": "assistant",
-                "message": {"role": "assistant", "content": [{"type": "tool_use", "id": tool_id, "name": str(payload.get("tool")), "input": payload.get("args", {}) if isinstance(payload.get("args", {}), dict) else {}}]},
+                "message": {"role": "assistant", "content": [{"type": "tool_use", "id": tool_id, "name": tool_name, "input": tool_input}]},
             })
+            self._pixel_hook_emit("PreToolUse", tool_name=tool_name, tool_input=tool_input)
         else:
             final_text = str(payload.get("final")) if payload and "final" in payload else content
             self._write_pixel_record({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": final_text}]}})
@@ -344,10 +352,49 @@ class StellaAgent:
             "type": "user",
             "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": result.content[:12000], "is_error": not result.ok}]},
         })
+        self._pixel_hook_emit("PostToolUseFailure" if not result.ok else "PostToolUse")
         self._pending_pixel_tool_id = None
 
     def _write_pixel_turn_end(self) -> None:
         self._write_pixel_record({"type": "system", "subtype": "turn_duration", "duration_ms": 0})
+        self._pixel_hook_emit("Stop")
+
+    def _pixel_hook_config(self) -> dict[str, Any] | None:
+        if self._pixel_hook_disabled:
+            return None
+        if self._pixel_hook_cfg is not None:
+            return self._pixel_hook_cfg
+        try:
+            raw = (Path.home() / ".pixel-agents" / "server.json").read_text(encoding="utf-8")
+            cfg = json.loads(raw)
+            if isinstance(cfg, dict) and cfg.get("port") and cfg.get("token"):
+                self._pixel_hook_cfg = cfg
+                return cfg
+        except (OSError, ValueError):
+            pass
+        self._pixel_hook_disabled = True
+        return None
+
+    def _pixel_hook_emit(self, hook_event_name: str, **extra: Any) -> None:
+        cfg = self._pixel_hook_config()
+        if not cfg:
+            return
+        payload: dict[str, Any] = {
+            "session_id": self.pixel_session_id,
+            "hook_event_name": hook_event_name,
+            "cwd": str(self.root),
+            "transcript_path": str(self.pixel_session_file),
+        }
+        payload.update(extra)
+        try:
+            requests.post(
+                f"http://127.0.0.1:{cfg['port']}/api/hooks/claude",
+                json=payload,
+                headers={"Authorization": f"Bearer {cfg['token']}"},
+                timeout=1.5,
+            )
+        except (requests.RequestException, OSError):
+            pass
 
     def _compact_context_if_needed(self) -> None:
         total = sum(len(item.get("content", "")) for item in self.messages)

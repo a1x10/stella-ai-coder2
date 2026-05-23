@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_RAW="${STELLA_REPO_RAW:-https://raw.githubusercontent.com/a1x10/stella-ai-coder/main}"
+REPO_RAW="${STELLA_REPO_RAW:-https://raw.githubusercontent.com/a1x10/stella-ai-coder2/main}"
 INSTALL_DIR="${STELLA_INSTALL_DIR:-$HOME/.stella-ai-coder}"
 VENV_DIR="$INSTALL_DIR/.venv"
 AGENT_FILE="$INSTALL_DIR/stella_ai_coder.py"
@@ -79,6 +79,52 @@ fi
 
 if ! command_exists git || ! command_exists npm; then
   printf '\033[33mGit and npm are recommended for optional Pixel Agents source setup.\033[0m\n'
+fi
+
+# ── Pixel Agents: install VS Code extension and enable Watch All Sessions ──
+# Makes Stella appear as a pixel character in the Pixel Agents panel out of the box.
+if command_exists code; then
+  if ! code --list-extensions 2>/dev/null | grep -qx 'pablodelucca.pixel-agents'; then
+    printf '\033[36mInstalling Pixel Agents VS Code extension...\033[0m\n'
+    code --install-extension pablodelucca.pixel-agents >/dev/null 2>&1 \
+      && printf '\033[32mPixel Agents extension installed.\033[0m\n' \
+      || printf '\033[33mCould not install Pixel Agents extension automatically.\033[0m\n'
+  else
+    printf '\033[90mPixel Agents extension already installed.\033[0m\n'
+  fi
+
+  # Enable Watch All Sessions in VS Code user settings so the panel discovers
+  # Stella's session regardless of which workspace folder is open.
+  case "$(uname -s)" in
+    Darwin) SETTINGS_DIR="$HOME/Library/Application Support/Code/User" ;;
+    *) SETTINGS_DIR="$HOME/.config/Code/User" ;;
+  esac
+  SETTINGS_PATH="$SETTINGS_DIR/settings.json"
+  mkdir -p "$SETTINGS_DIR"
+  if command_exists python3; then
+    python3 - "$SETTINGS_PATH" <<'PY' || printf '\033[33mCould not update VS Code settings.json automatically.\033[0m\n'
+import json, re, sys, pathlib
+p = pathlib.Path(sys.argv[1])
+data = {}
+if p.exists():
+    raw = p.read_text(encoding="utf-8")
+    cleaned = re.sub(r"(?m)^\s*//.*$", "", raw)
+    cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)
+    try:
+        data = json.loads(cleaned) if cleaned.strip() else {}
+    except json.JSONDecodeError:
+        data = {}
+key = "pixel-agents.watchAllSessions"
+if data.get(key) is not True:
+    data[key] = True
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    print("\033[32mEnabled pixel-agents.watchAllSessions in VS Code settings.\033[0m")
+PY
+  fi
+else
+  printf '\033[33mVS Code (code) was not found in PATH.\033[0m\n'
+  printf '\033[33mInstall VS Code from https://code.visualstudio.com and re-run this installer\033[0m\n'
+  printf '\033[33mto get the Pixel Agents pixel-office UI for Stella sessions.\033[0m\n'
 fi
 
 if ! command_exists ollama; then
