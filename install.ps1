@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $RepoRaw = $env:STELLA_REPO_RAW
 if ([string]::IsNullOrWhiteSpace($RepoRaw)) {
-    $RepoRaw = "https://raw.githubusercontent.com/a1x10/stella-ai-coder/main"
+    $RepoRaw = "$RepoRaw = "https://raw.githubusercontent.com/a1x10/stella-ai-coder2/main"
 }
 
 $InstallDir = Join-Path $env:USERPROFILE ".stella-ai-coder"
